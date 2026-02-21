@@ -1,0 +1,770 @@
+openapi: 3.0.3
+info:
+  title: SkyHigh Core - Digital Check-In System API
+  description: |
+    API for airline self-check-in system handling seat selection, 
+    baggage validation, payment processing, and boarding pass generation.
+    
+    ## Authentication
+    All endpoints except `/api/v1/auth/*` require JWT Bearer token authentication.
+    
+    ## Rate Limiting
+    - Login: 5 requests per 15 minutes per booking reference
+    - Seat map: 60 requests per minute
+    - Other endpoints: 30 requests per minute
+  version: 1.0.0
+  contact:
+    name: SkyHigh Airlines Support
+    email: support@skyhigh.com
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: Authentication
+    description: Login and token management
+  - name: Flights
+    description: Flight information and seat maps
+  - name: Seats
+    description: Seat hold, release, and confirmation
+  - name: Check-In
+    description: Check-in process management
+  - name: Boarding Pass
+    description: Boarding pass generation and download
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Authenticate passenger
+      description: Login using booking reference, last name, and email
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Successful authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/auth/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Refresh access token
+      description: Get a new access token using refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Invalid or expired refresh token
+
+  /api/v1/flights/{flightId}:
+    get:
+      tags:
+        - Flights
+      summary: Get flight details
+      parameters:
+        - name: flightId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Flight details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlightResponse'
+        '403':
+          description: No access to this flight
+        '404':
+          description: Flight not found
+
+  /api/v1/flights/{flightId}/seats:
+    get:
+      tags:
+        - Flights
+      summary: Get seat map
+      description: Get the seat map with availability status (cached for 5 seconds)
+      parameters:
+        - name: flightId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Seat map
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeatMapResponse'
+        '403':
+          description: No access to this flight
+
+  /api/v1/seats/{seatId}/hold:
+    post:
+      tags:
+        - Seats
+      summary: Hold a seat
+      description: Reserve a seat for 120 seconds
+      parameters:
+        - name: seatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HoldSeatRequest'
+      responses:
+        '200':
+          description: Seat held successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeatHoldResponse'
+        '409':
+          description: Seat already held or confirmed
+
+    delete:
+      tags:
+        - Seats
+      summary: Release seat hold
+      parameters:
+        - name: seatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Seat released
+        '422':
+          description: Cannot release seat
+
+  /api/v1/seats/{seatId}/confirm:
+    post:
+      tags:
+        - Seats
+      summary: Confirm seat assignment
+      description: Permanently confirm a held seat
+      parameters:
+        - name: seatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Seat confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeatHoldResponse'
+        '409':
+          description: Seat already confirmed
+        '422':
+          description: Seat hold expired
+
+  /api/v1/check-in/start:
+    post:
+      tags:
+        - Check-In
+      summary: Start check-in
+      description: Start a new check-in session (expires after 10 minutes)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartCheckInRequest'
+      responses:
+        '201':
+          description: Check-in session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResponse'
+        '409':
+          description: Active check-in already exists
+        '422':
+          description: Check-in window not open
+
+  /api/v1/check-in/{checkInId}:
+    get:
+      tags:
+        - Check-In
+      summary: Get check-in status
+      parameters:
+        - name: checkInId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Check-in details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResponse'
+
+    delete:
+      tags:
+        - Check-In
+      summary: Cancel check-in
+      parameters:
+        - name: checkInId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Check-in cancelled
+
+  /api/v1/check-in/{checkInId}/baggage:
+    post:
+      tags:
+        - Check-In
+      summary: Add baggage
+      description: Add baggage weight (max 25kg, excess charged at ₹200/kg)
+      parameters:
+        - name: checkInId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BaggageRequest'
+      responses:
+        '200':
+          description: Baggage added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResponse'
+
+  /api/v1/check-in/{checkInId}/payment:
+    post:
+      tags:
+        - Check-In
+      summary: Process payment
+      description: Process payment for excess baggage fee
+      parameters:
+        - name: checkInId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+      responses:
+        '200':
+          description: Payment processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResponse'
+        '422':
+          description: Payment failed
+
+  /api/v1/check-in/{checkInId}/confirm:
+    post:
+      tags:
+        - Check-In
+      summary: Confirm check-in
+      description: Complete check-in and generate boarding pass
+      parameters:
+        - name: checkInId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Check-in completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResponse'
+        '402':
+          description: Payment required
+        '422':
+          description: Cannot complete check-in
+
+  /api/v1/boarding-pass/{checkInId}:
+    get:
+      tags:
+        - Boarding Pass
+      summary: Get boarding pass
+      parameters:
+        - name: checkInId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Boarding pass details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoardingPassResponse'
+
+  /api/v1/boarding-pass/{checkInId}/download:
+    get:
+      tags:
+        - Boarding Pass
+      summary: Download boarding pass PDF
+      parameters:
+        - name: checkInId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: PDF file
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    LoginRequest:
+      type: object
+      required:
+        - bookingReference
+        - lastName
+        - email
+      properties:
+        bookingReference:
+          type: string
+          pattern: '^[A-Z0-9]{6}$'
+          example: ABC123
+        lastName:
+          type: string
+          example: Doe
+        email:
+          type: string
+          format: email
+          example: john.doe@email.com
+
+    RefreshTokenRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+
+    LoginResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        tokenType:
+          type: string
+          example: Bearer
+        expiresIn:
+          type: integer
+          example: 7200
+        passenger:
+          $ref: '#/components/schemas/PassengerInfo'
+        flights:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlightInfo'
+
+    PassengerInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+
+    FlightInfo:
+      type: object
+      properties:
+        flightId:
+          type: string
+          format: uuid
+        flightNumber:
+          type: string
+        departureTime:
+          type: string
+          format: date-time
+        origin:
+          type: string
+        destination:
+          type: string
+        checkInOpen:
+          type: boolean
+        checkInOpensAt:
+          type: string
+          format: date-time
+        checkInClosesAt:
+          type: string
+          format: date-time
+
+    FlightResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        flightNumber:
+          type: string
+        departureTime:
+          type: string
+          format: date-time
+        arrivalTime:
+          type: string
+          format: date-time
+        origin:
+          type: string
+        destination:
+          type: string
+        aircraftType:
+          type: string
+        status:
+          type: string
+          enum: [SCHEDULED, BOARDING, DEPARTED, ARRIVED, CANCELLED]
+        totalSeats:
+          type: integer
+        gate:
+          type: string
+        checkInOpen:
+          type: boolean
+        seatSummary:
+          type: object
+          properties:
+            totalAvailable:
+              type: integer
+            totalHeld:
+              type: integer
+            totalConfirmed:
+              type: integer
+
+    SeatMapResponse:
+      type: object
+      properties:
+        flightId:
+          type: string
+          format: uuid
+        flightNumber:
+          type: string
+        seatsByClass:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/SeatInfo'
+        summary:
+          type: object
+          properties:
+            total:
+              type: integer
+            available:
+              type: integer
+            held:
+              type: integer
+            confirmed:
+              type: integer
+        retrievedAt:
+          type: string
+          format: date-time
+
+    SeatInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        seatNumber:
+          type: string
+        seatClass:
+          type: string
+          enum: [FIRST, BUSINESS, ECONOMY]
+        status:
+          type: string
+          enum: [AVAILABLE, HELD, CONFIRMED]
+        available:
+          type: boolean
+
+    HoldSeatRequest:
+      type: object
+      required:
+        - checkInId
+      properties:
+        checkInId:
+          type: string
+          format: uuid
+
+    SeatHoldResponse:
+      type: object
+      properties:
+        seatId:
+          type: string
+          format: uuid
+        seatNumber:
+          type: string
+        seatClass:
+          type: string
+        status:
+          type: string
+        heldUntil:
+          type: string
+          format: date-time
+        holdDurationSeconds:
+          type: integer
+
+    StartCheckInRequest:
+      type: object
+      required:
+        - flightId
+        - bookingReference
+      properties:
+        flightId:
+          type: string
+          format: uuid
+        bookingReference:
+          type: string
+
+    BaggageRequest:
+      type: object
+      required:
+        - weightKg
+      properties:
+        weightKg:
+          type: number
+          minimum: 0
+          example: 20.5
+
+    PaymentRequest:
+      type: object
+      required:
+        - amount
+      properties:
+        amount:
+          type: number
+          minimum: 0.01
+        currency:
+          type: string
+          default: INR
+        paymentMethod:
+          type: string
+          default: CARD
+        idempotencyKey:
+          type: string
+
+    CheckInResponse:
+      type: object
+      properties:
+        checkInId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [IN_PROGRESS, WAITING_PAYMENT, COMPLETED, CANCELLED, EXPIRED]
+        flight:
+          $ref: '#/components/schemas/FlightInfo'
+        passenger:
+          $ref: '#/components/schemas/PassengerInfo'
+        seat:
+          type: object
+          properties:
+            seatId:
+              type: string
+              format: uuid
+            seatNumber:
+              type: string
+            seatClass:
+              type: string
+            heldUntil:
+              type: string
+              format: date-time
+        baggage:
+          type: object
+          properties:
+            weightKg:
+              type: number
+            maxAllowedKg:
+              type: number
+            excessKg:
+              type: number
+            excessFee:
+              type: number
+            currency:
+              type: string
+            paymentRequired:
+              type: boolean
+        startedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        nextSteps:
+          type: array
+          items:
+            type: string
+        boardingPass:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            barcode:
+              type: string
+            downloadUrl:
+              type: string
+
+    BoardingPassResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        passengerName:
+          type: string
+        flightNumber:
+          type: string
+        seatNumber:
+          type: string
+        seatClass:
+          type: string
+        origin:
+          type: string
+        destination:
+          type: string
+        departureTime:
+          type: string
+          format: date-time
+        gate:
+          type: string
+        boardingTime:
+          type: string
+          format: date-time
+        barcode:
+          type: string
+        qrCodeBase64:
+          type: string
+        downloadUrl:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: string
+            retryable:
+              type: boolean
+            retryAfterSeconds:
+              type: integer
+        meta:
+          type: object
+          properties:
+            timestamp:
+              type: string
+              format: date-time
+            requestId:
+              type: string
+            path:
+              type: string
+        suggestions:
+          type: array
+          items:
+            type: object
+            properties:
+              action:
+                type: string
+              endpoint:
+                type: string
+              message:
+                type: string
+

@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: skyhigh-postgres
+    environment:
+      POSTGRES_DB: skyhigh_checkin
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - skyhigh-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: skyhigh-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - skyhigh-network
+
+  # SkyHigh Check-In Application
+  check-in-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: skyhigh-checkin
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/skyhigh_checkin
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      JWT_SECRET: skyhigh-airlines-super-secret-key-for-jwt-token-generation-min-256-bits
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - skyhigh-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  skyhigh-network:
+    driver: bridge
+

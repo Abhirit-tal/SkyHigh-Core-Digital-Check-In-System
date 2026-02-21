@@ -1,0 +1,50 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: skyhigh-checkin-test
+
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+
+  flyway:
+    enabled: false
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+  cache:
+    type: simple
+
+jwt:
+  secret: test-secret-key-for-jwt-token-generation-minimum-256-bits-required
+  access-token-expiration: 7200000
+  refresh-token-expiration: 86400000
+
+skyhigh:
+  checkin:
+    seat-hold-duration-seconds: 120
+    session-timeout-minutes: 10
+    max-baggage-weight-kg: 25
+    excess-baggage-fee-per-kg: 200
+    checkin-window-opens-hours: 24
+    checkin-window-closes-hours: 1
+
+logging:
+  level:
+    com.skyhigh: DEBUG
+
