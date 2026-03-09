@@ -52,6 +52,13 @@ public class Seat {
     @JoinColumn(name = "confirmed_by_passenger_id")
     private Passenger confirmedByPassenger;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "cancelled_by_passenger_id")
+    private Passenger cancelledByPassenger;
+
+    @Column(name = "cancelled_at")
+    private LocalDateTime cancelledAt;
+
     @Version
     @Column(nullable = false)
     @Builder.Default
@@ -77,12 +84,32 @@ public class Seat {
         return status == SeatStatus.CONFIRMED;
     }
 
+    public boolean isCancelled() {
+        return status == SeatStatus.CANCELLED;
+    }
+
     public boolean isHeldByPassenger(UUID passengerId) {
         return isHeld() && heldByPassenger != null && heldByPassenger.getId().equals(passengerId);
     }
 
+    public boolean isConfirmedByPassenger(UUID passengerId) {
+        return isConfirmed() && confirmedByPassenger != null && confirmedByPassenger.getId().equals(passengerId);
+    }
+
     public boolean isHoldExpired() {
         return isHeld() && heldUntil != null && LocalDateTime.now().isAfter(heldUntil);
+    }
+
+    /**
+     * Resets the seat to AVAILABLE state, clearing all hold/confirm/cancel fields.
+     */
+    public void resetToAvailable() {
+        this.status = SeatStatus.AVAILABLE;
+        this.heldByPassenger = null;
+        this.heldUntil = null;
+        this.confirmedByPassenger = null;
+        this.cancelledByPassenger = null;
+        this.cancelledAt = null;
     }
 }
 

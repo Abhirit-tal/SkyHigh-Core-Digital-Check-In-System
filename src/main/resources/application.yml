@@ -51,6 +51,19 @@ spring:
     redis:
       time-to-live: 5000
 
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    listener:
+      simple:
+        retry:
+          enabled: true
+          initial-interval: 1000
+          max-attempts: 3
+          max-interval: 10000
+
 # JWT Configuration
 jwt:
   secret: ${JWT_SECRET:skyhigh-airlines-super-secret-key-for-jwt-token-generation-min-256-bits}
@@ -66,6 +79,19 @@ skyhigh:
     excess-baggage-fee-per-kg: 200
     checkin-window-opens-hours: 24
     checkin-window-closes-hours: 1
+    waitlist-offer-duration-minutes: 5
+    waitlist-max-per-flight: 50
+    rate-limit-seat-map-max-requests: 50
+    rate-limit-seat-map-window-seconds: 2
+    rate-limit-block-duration-minutes: 5
+
+# RabbitMQ Event Configuration
+skyhigh.events:
+  exchange: skyhigh.events
+  queues:
+    seat-released: seat.released
+    waitlist-offer: waitlist.offer
+    waitlist-notification: waitlist.notification
 
 # OpenAPI Documentation
 springdoc:
@@ -80,10 +106,16 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: when_authorized
+  metrics:
+    tags:
+      application: skyhigh-checkin
+    export:
+      prometheus:
+        enabled: true
 
 # Logging
 logging:
@@ -93,5 +125,4 @@ logging:
     org.flywaydb: DEBUG
     org.hibernate.SQL: DEBUG
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] [%X{requestId:-}] %-5level %logger{36} - %msg%n"

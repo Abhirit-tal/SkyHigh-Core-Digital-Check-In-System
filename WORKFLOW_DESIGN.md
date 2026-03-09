@@ -147,6 +147,222 @@
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+## 6. Seat Cancellation Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      SEAT CANCELLATION WORKFLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Passenger ──▶ DELETE /api/v1/seats/{seatId}/confirm                        │
+│                                                                              │
+│  ┌────────────────┐                                                         │
+│  │ Validate Seat  │  Is seat CONFIRMED?                                     │
+│  │ State          │  Is passenger the confirmer?                            │
+│  └───────┬────────┘                                                         │
+│          │ YES                                                               │
+│          ▼                                                                   │
+│  ┌────────────────┐                                                         │
+│  │ Seat Status:   │  CONFIRMED → AVAILABLE (single atomic save)            │
+│  │ CANCELLED      │  (audit logged for CANCELLED + AVAILABLE transitions)  │
+│  └───────┬────────┘                                                         │
+│          │                                                                   │
+│          ▼                                                                   │
+│  ┌────────────────────────────────────┐                                     │
+│  │ Register Spring domain event       │                                     │
+│  │ via SeatDomainEventPublisher       │                                     │
+│  └───────┬────────────────────────────┘                                     │
+│          │                                                                   │
+│          ▼  (Transaction commits)                                            │
+│  ┌────────────────────────────────────┐                                     │
+│  │ @TransactionalEventListener        │                                     │
+│  │ (phase = AFTER_COMMIT)             │                                     │
+│  │ Publish SeatReleasedEvent          │                                     │
+│  │ to RabbitMQ (skyhigh.events)       │                                     │
+│  │ routing key: seat.released         │                                     │
+│  └───────┬────────────────────────────┘                                     │
+│          │                                                                   │
+│          ▼                                                                   │
+│  ┌────────────────────────────────────┐                                     │
+│  │ WaitlistEventListener picks up     │                                     │
+│  │ event, calls offerSeatToNextInLine │                                     │
+│  └────────────────────────────────────┘                                     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## 7. Waitlist Workflow
+
+### 7.1 Join Waitlist
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      WAITLIST JOIN WORKFLOW                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Passenger ──▶ POST /api/v1/flights/{flightId}/waitlist                     │
+│                Body: { preferredSeatClass: "ECONOMY" }                      │
+│                                                                              │
+│  ┌────────────────┐                                                         │
+│  │ Validate:      │                                                         │
+│  │ • Flight exists│                                                         │
+│  │ • Not already  │                                                         │
+│  │   on waitlist  │                                                         │
+│  │ • Capacity < 50│                                                         │
+│  └───────┬────────┘                                                         │
+│          │                                                                   │
+│          ▼                                                                   │
+│  ┌────────────────┐                                                         │
+│  │ Create entry   │  priority = MAX(priority) + 1 (FIFO)                   │
+│  │ Status: WAITING│  preferredSeatClass = ECONOMY                          │
+│  └───────┬────────┘                                                         │
+│          │                                                                   │
+│          ▼                                                                   │
+│  Response: { entryId, position, status: WAITING }                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 Seat Offer → Accept Flow (Event-Driven)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              WAITLIST SEAT OFFER FLOW (EVENT-DRIVEN)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐        ┌───────────────┐        ┌──────────────────────┐ │
+│  │ Seat becomes │──────▶ │ RabbitMQ      │──────▶ │ WaitlistEventListener│ │
+│  │ AVAILABLE    │ event  │ seat.released │ consume │                      │ │
+│  │ (cancel or   │        │ queue         │        │ offerSeatToNextInLine│ │
+│  │  hold expiry)│        └───────────────┘        └──────────┬───────────┘ │
+│  └──────────────┘                                            │              │
+│                                                              ▼              │
+│                                                  ┌────────────────────┐     │
+│                                                  │ Find next WAITING  │     │
+│                                                  │ passenger (FIFO)   │     │
+│                                                  │ matching seat class│     │
+│                                                  └─────────┬──────────┘     │
+│                                                            │                │
+│                                                            ▼                │
+│                                                  ┌────────────────────┐     │
+│                                                  │ Set status: OFFERED│     │
+│                                                  │ offerExpiresAt:    │     │
+│                                                  │ now + 5 minutes    │     │
+│                                                  └─────────┬──────────┘     │
+│                                                            │                │
+│                                                            ▼                │
+│                                                  ┌────────────────────┐     │
+│                                                  │ Publish            │     │
+│                                                  │ WaitlistOfferEvent │     │
+│                                                  │ (notification)     │     │
+│                                                  └────────────────────┘     │
+│                                                                              │
+│  Passenger ──▶ POST /api/v1/waitlist/{entryId}/accept                       │
+│                                                                              │
+│  ┌────────────────────┐                                                     │
+│  │ Validate offer     │  Not expired? Seat still available?                 │
+│  │ Status → ASSIGNED  │                                                     │
+│  │ Proceed to check-in│                                                     │
+│  └────────────────────┘                                                     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.3 Waitlist State Machine
+
+```
+  ┌─────────┐   join    ┌─────────┐   seat offered  ┌─────────┐
+  │         │──────────▶│ WAITING │────────────────▶│ OFFERED │
+  │  (new)  │           │         │                 │         │
+  └─────────┘           └────┬────┘                 └────┬────┘
+                             │ leave                      │
+                             ▼                    ┌───────┴───────┐
+                        ┌─────────┐               │               │
+                        │  LEFT   │           accept           decline/
+                        └─────────┘               │           timeout
+                                                  ▼               ▼
+                                           ┌───────────┐   ┌───────────┐
+                                           │ ASSIGNED  │   │  EXPIRED  │
+                                           └───────────┘   │  or LEFT  │
+                                                           └───────────┘
+```
+
+## 8. Abuse Detection & Rate Limiting Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                 RATE LIMITING & BOT DETECTION WORKFLOW                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  GET /api/v1/flights/{id}/seats                                             │
+│          │                                                                   │
+│          ▼                                                                   │
+│  ┌────────────────────┐                                                     │
+│  │ RateLimitingFilter │  (runs before JwtAuthenticationFilter)              │
+│  │ Is seat-map GET?   │                                                     │
+│  └────────┬───────────┘                                                     │
+│           │ YES                                                              │
+│           ▼                                                                  │
+│  ┌────────────────────┐                                                     │
+│  │ Check Redis:       │  Key: blocked:{IP}:{passengerId}                    │
+│  │ Is source blocked? │                                                     │
+│  └────────┬───────────┘                                                     │
+│           │ NO                                                               │
+│           ▼                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────┐     │
+│  │ Sliding Window (Redis Sorted Set)                                   │     │
+│  │ ZADD ratelimit:seat-map:{source} {timestamp} {timestamp}           │     │
+│  │ ZREMRANGEBYSCORE ... (remove entries older than 2s)                  │     │
+│  │ ZCARD ... (count entries in window)                                  │     │
+│  └────────┬───────────────────────────────────────────────────────────┘     │
+│           │                                                                  │
+│    count ≤ 50?                                                              │
+│    ┌──────┴──────┐                                                          │
+│    │ YES         │ NO (> 50 requests in 2 seconds)                          │
+│    ▼             ▼                                                          │
+│  ┌──────┐   ┌──────────────────────────────────────────┐                    │
+│  │ PASS │   │ BLOCK SOURCE                              │                    │
+│  │      │   │ • SET blocked:{source} BLOCKED EX 300     │                    │
+│  │      │   │ • INSERT INTO abuse_audit_log             │                    │
+│  │      │   │ • Return HTTP 429 + Retry-After header    │                    │
+│  └──────┘   └──────────────────────────────────────────┘                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## 9. Database Schema (Updated)
+
+### New Tables
+
+#### waitlist_entries
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID PK | Entry identifier |
+| flight_id | UUID FK | Reference to flights |
+| passenger_id | UUID FK | Reference to passengers |
+| preferred_seat_class | VARCHAR(20) | FIRST, BUSINESS, ECONOMY (nullable) |
+| priority | INTEGER | FIFO ordering (auto-increment per flight) |
+| status | VARCHAR(20) | WAITING, OFFERED, ASSIGNED, EXPIRED, LEFT |
+| joined_at | TIMESTAMP | When passenger joined |
+| offered_at | TIMESTAMP | When seat was offered |
+| offer_expires_at | TIMESTAMP | Offer deadline |
+| assigned_seat_id | UUID FK | Reference to seats (when offered/assigned) |
+
+#### abuse_audit_log
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID PK | Log entry identifier |
+| source_identifier | VARCHAR(255) | IP:passengerId composite key |
+| event_type | VARCHAR(50) | RATE_LIMIT_EXCEEDED, BOT_DETECTED, BLOCKED |
+| endpoint | VARCHAR(255) | Endpoint that was rate-limited |
+| request_count | INTEGER | Number of requests in window |
+| window_seconds | INTEGER | Window duration |
+| blocked_until | TIMESTAMP | When the block expires |
+
+### Updated seats Table
+Added columns: `cancelled_at TIMESTAMP`, `cancelled_by_passenger_id UUID`
+Updated CHECK constraint: `status IN ('AVAILABLE', 'HELD', 'CONFIRMED', 'CANCELLED')`
+
 ### 1.2 Seat Hold & Release Lifecycle
 
 ```

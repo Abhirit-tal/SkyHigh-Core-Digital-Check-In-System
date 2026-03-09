@@ -4,13 +4,18 @@ A high-concurrency backend service for airline self-check-in that handles peak-h
 
 ## Features
 
-- **Seat Lifecycle Management**: AVAILABLE → HELD → CONFIRMED
+- **Seat Lifecycle Management**: AVAILABLE → HELD → CONFIRMED → CANCELLED
 - **Time-Bound Seat Holds**: 120-second reservation window with automatic release
 - **Conflict-Free Seat Assignment**: Redis distributed locks + PostgreSQL optimistic locking
+- **Seat Cancellation**: Confirmed seats can be cancelled; triggers waitlist processing
+- **Waitlist System**: FIFO queue per flight with auto-assignment via event-driven architecture
+- **Abuse/Bot Detection**: Redis sliding-window rate limiter (50 req/2s per source, 5-min block)
+- **Event-Driven Architecture**: RabbitMQ for seat-released events and waitlist notifications
 - **Baggage Validation**: Weight validation with excess fee calculation (₹200/kg over 25kg)
 - **Payment Processing**: Mock payment service with deterministic test scenarios
 - **Boarding Pass Generation**: PDF generation with QR codes
 - **High-Performance Seat Map**: Redis caching with <1 second P95 latency
+- **Observability**: Prometheus metrics + Grafana dashboards + structured logging
 
 ## Tech Stack
 
@@ -18,6 +23,8 @@ A high-concurrency backend service for airline self-check-in that handles peak-h
 - **Framework**: Spring Boot 3.2
 - **Database**: PostgreSQL 15
 - **Cache/Locking**: Redis 7
+- **Message Broker**: RabbitMQ 3.12 (event-driven waitlist processing)
+- **Metrics**: Prometheus + Grafana
 - **Documentation**: OpenAPI 3.0 (Swagger)
 - **Containerization**: Docker & Docker Compose
 
@@ -28,6 +35,7 @@ A high-concurrency backend service for airline self-check-in that handles peak-h
 - Docker & Docker Compose
 - PostgreSQL 15 (or use Docker)
 - Redis 7 (or use Docker)
+- RabbitMQ 3.12 (or use Docker)
 
 ## Quick Start
 
@@ -44,17 +52,22 @@ docker-compose up --build
 # Access the application
 # API: http://localhost:8080
 # Swagger UI: http://localhost:8080/swagger-ui.html
+# RabbitMQ Management: http://localhost:15672 (guest/guest)
+# Prometheus: http://localhost:9090
+# Grafana: http://localhost:3000 (admin/admin)
 ```
 
 ### Option 2: Local Development
 
-1. **Start PostgreSQL and Redis**
+1. **Start PostgreSQL, Redis, and RabbitMQ**
 
 ```bash
 # Using Docker
 docker run -d --name postgres -e POSTGRES_DB=skyhigh_checkin -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:15-alpine
 
 docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3.12-management-alpine
 ```
 
 2. **Build and Run the Application**
@@ -200,18 +213,46 @@ skyhigh:
 
 ## Testing
 
-### Run Unit Tests
+### Run Unit Tests (no Docker required)
 
 ```bash
-mvn test
+mvn clean test
 ```
+
+### Run Integration Tests (requires Docker)
+
+```bash
+mvn verify -Pintegration-test
+```
+
+Integration tests use **Testcontainers** to spin up real PostgreSQL 15 and Redis 7 containers.
+They verify:
+- Redis distributed locking under 10-thread concurrency
+- Redis lock TTL expiry behavior
+- Flyway migrations on real PostgreSQL (not H2)
+- PostgreSQL pessimistic locking (SELECT FOR UPDATE)
 
 ### Run Tests with Coverage
 
 ```bash
-mvn test jacoco:report
+mvn clean test jacoco:report
 # Coverage report: target/site/jacoco/index.html
 ```
+
+### Test Summary (61 unit tests, 4 integration tests)
+
+| Category | Tests | Scope |
+|----------|-------|-------|
+| Seat lifecycle | 15 | Hold, confirm, cancel, release, state transitions |
+| Waitlist | 6 | Join, leave, offer, accept, decline, FIFO |
+| Rate limiting | 6 | Sliding window, blocking, fail-open |
+| Redis locks | 9 | Acquire, release, force-release, errors |
+| Check-in flow | 8 | Start, baggage, payment, cancel |
+| Concurrency | 2 | 10-thread lock acquisition |
+| Payment | 4 | Success, decline, timeout, idempotency |
+| Auth | 3 | Login, invalid booking ref, invalid email |
+| Context | 1 | Spring Boot context load |
+| **Integration** | **4** | Real PostgreSQL + Redis via Testcontainers |
 
 ## Mock Services
 

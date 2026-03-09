@@ -21,7 +21,7 @@ services:
     networks:
       - skyhigh-network
 
-  # Redis Cache
+  # Redis Cache & Distributed Locks
   redis:
     image: redis:7-alpine
     container_name: skyhigh-redis
@@ -33,6 +33,26 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
+      retries: 5
+    networks:
+      - skyhigh-network
+
+  # RabbitMQ Message Broker (Event-Driven Architecture)
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: skyhigh-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 15s
+      timeout: 10s
       retries: 5
     networks:
       - skyhigh-network
@@ -49,13 +69,19 @@ services:
       SPRING_DATASOURCE_PASSWORD: postgres
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
-      JWT_SECRET: skyhigh-airlines-super-secret-key-for-jwt-token-generation-min-256-bits
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      JWT_SECRET: ${JWT_SECRET:-skyhigh-airlines-docker-compose-dev-secret-replace-in-production-256bit-min}  # ⚠ Override via .env or env var in production
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
@@ -66,9 +92,58 @@ services:
     networks:
       - skyhigh-network
 
+  # Prometheus (Metrics Collection)
+  prometheus:
+    image: prom/prometheus:v2.49.0
+    container_name: skyhigh-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+    depends_on:
+      check-in-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - skyhigh-network
+
+  # Grafana (Metrics Visualization)
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: skyhigh-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - skyhigh-network
+
 volumes:
   postgres_data:
   redis_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   skyhigh-network:

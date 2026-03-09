@@ -27,9 +27,11 @@ tags:
   - name: Flights
     description: Flight information and seat maps
   - name: Seats
-    description: Seat hold, release, and confirmation
+    description: Seat hold, release, confirmation, and cancellation
   - name: Check-In
     description: Check-in process management
+  - name: Waitlist
+    description: Seat waitlist management (join, leave, status, accept, decline)
   - name: Boarding Pass
     description: Boarding pass generation and download
 
@@ -386,6 +388,159 @@ paths:
                 type: string
                 format: binary
 
+  # ==================== SEAT CANCELLATION ====================
+  /api/v1/seats/{seatId}/confirm:
+    delete:
+      tags: [Seats]
+      summary: Cancel confirmed seat
+      description: |
+        Cancel a previously confirmed seat. The seat becomes AVAILABLE and is 
+        automatically offered to the next waitlisted passenger via RabbitMQ event.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: seatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Seat cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeatHoldResponse'
+        '409':
+          description: Seat not in CONFIRMED state or not owned by passenger
+        '429':
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+
+  # ==================== WAITLIST ====================
+  /api/v1/flights/{flightId}/waitlist:
+    post:
+      tags: [Waitlist]
+      summary: Join waitlist
+      description: |
+        Join the waitlist for a flight when no seats are available.
+        The passenger will be notified via event when a seat becomes available.
+        Waitlist follows FIFO ordering per flight.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: flightId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JoinWaitlistRequest'
+      responses:
+        '201':
+          description: Added to waitlist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WaitlistResponse'
+        '409':
+          description: Already on waitlist
+        '422':
+          description: Waitlist full
+    delete:
+      tags: [Waitlist]
+      summary: Leave waitlist
+      description: Remove yourself from the waitlist for a flight
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: flightId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Removed from waitlist
+        '404':
+          description: Not on waitlist
+
+  /api/v1/flights/{flightId}/waitlist/status:
+    get:
+      tags: [Waitlist]
+      summary: Get waitlist status
+      description: Get your current position and status on the waitlist
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: flightId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Waitlist status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WaitlistResponse'
+
+  /api/v1/waitlist/{entryId}/accept:
+    post:
+      tags: [Waitlist]
+      summary: Accept waitlist seat offer
+      description: |
+        Accept a seat offer from the waitlist. Must be done before the offer expires (5 min).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Offer accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WaitlistResponse'
+        '410':
+          description: Offer expired
+
+  /api/v1/waitlist/{entryId}/decline:
+    post:
+      tags: [Waitlist]
+      summary: Decline waitlist seat offer
+      description: |
+        Decline a seat offer. The seat will be offered to the next passenger in the queue.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Offer declined
+
 components:
   securitySchemes:
     bearerAuth:
@@ -394,6 +549,62 @@ components:
       bearerFormat: JWT
 
   schemas:
+    JoinWaitlistRequest:
+      type: object
+      required:
+        - flightId
+      properties:
+        flightId:
+          type: string
+          format: uuid
+        preferredSeatClass:
+          type: string
+          enum: [FIRST, BUSINESS, ECONOMY]
+
+    WaitlistResponse:
+      type: object
+      properties:
+        entryId:
+          type: string
+          format: uuid
+        flightId:
+          type: string
+          format: uuid
+        passengerId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [WAITING, OFFERED, ASSIGNED, EXPIRED, LEFT]
+        preferredSeatClass:
+          type: string
+          enum: [FIRST, BUSINESS, ECONOMY]
+        position:
+          type: integer
+        totalWaiting:
+          type: integer
+        joinedAt:
+          type: string
+          format: date-time
+        offeredAt:
+          type: string
+          format: date-time
+        offerExpiresAt:
+          type: string
+          format: date-time
+        offeredSeat:
+          type: object
+          properties:
+            seatId:
+              type: string
+              format: uuid
+            seatNumber:
+              type: string
+            seatClass:
+              type: string
+        message:
+          type: string
+
     LoginRequest:
       type: object
       required:

@@ -28,6 +28,10 @@
     {
       "key": "seat_id",
       "value": ""
+    },
+    {
+      "key": "waitlist_entry_id",
+      "value": ""
     }
   ],
   "item": [
@@ -570,6 +574,113 @@
           }
         }
       ]
+    },
+    {
+      "name": "Seat Cancellation",
+      "item": [
+        {
+          "name": "Cancel Confirmed Seat",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/seats/{{seat_id}}/confirm",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "seats", "{{seat_id}}", "confirm"]
+            },
+            "description": "Cancel a confirmed seat. The seat becomes AVAILABLE and is offered to waitlisted passengers via RabbitMQ event."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Waitlist",
+      "item": [
+        {
+          "name": "Join Waitlist",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.collectionVariables.set('waitlist_entry_id', jsonData.entryId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"flightId\": \"{{flight_id}}\",\n    \"preferredSeatClass\": \"ECONOMY\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/flights/{{flight_id}}/waitlist",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "flights", "{{flight_id}}", "waitlist"]
+            },
+            "description": "Join the waitlist for a flight. FIFO ordering. Max 50 per flight."
+          }
+        },
+        {
+          "name": "Get Waitlist Status",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/flights/{{flight_id}}/waitlist/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "flights", "{{flight_id}}", "waitlist", "status"]
+            },
+            "description": "Get your current position and status on the waitlist."
+          }
+        },
+        {
+          "name": "Accept Waitlist Offer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
     }
   ]
 }

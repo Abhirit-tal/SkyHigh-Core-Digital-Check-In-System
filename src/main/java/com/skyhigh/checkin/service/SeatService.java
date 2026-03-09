@@ -1,6 +1,7 @@
 package com.skyhigh.checkin.service;
 
 import com.skyhigh.checkin.config.CheckInConfig;
+import com.skyhigh.checkin.dto.event.SeatReleasedEvent;
 import com.skyhigh.checkin.dto.response.SeatHoldResponse;
 import com.skyhigh.checkin.dto.response.SeatMapResponse;
 import com.skyhigh.checkin.exception.*;
@@ -14,7 +15,8 @@ import com.skyhigh.checkin.repository.CheckInRepository;
 import com.skyhigh.checkin.repository.PassengerRepository;
 import com.skyhigh.checkin.repository.SeatAuditLogRepository;
 import com.skyhigh.checkin.repository.SeatRepository;
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
@@ -27,7 +29,6 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class SeatService {
 
@@ -36,7 +37,37 @@ public class SeatService {
     private final CheckInRepository checkInRepository;
     private final SeatAuditLogRepository auditLogRepository;
     private final SeatLockService seatLockService;
+    private final SeatEventPublisher seatEventPublisher;
+    private final SeatDomainEventPublisher seatDomainEventPublisher;
     private final CheckInConfig checkInConfig;
+    private final Counter seatHoldCounter;
+    private final Counter seatConfirmCounter;
+    private final Counter seatCancelCounter;
+
+    public SeatService(SeatRepository seatRepository,
+                       PassengerRepository passengerRepository,
+                       CheckInRepository checkInRepository,
+                       SeatAuditLogRepository auditLogRepository,
+                       SeatLockService seatLockService,
+                       SeatEventPublisher seatEventPublisher,
+                       SeatDomainEventPublisher seatDomainEventPublisher,
+                       CheckInConfig checkInConfig,
+                       MeterRegistry meterRegistry) {
+        this.seatRepository = seatRepository;
+        this.passengerRepository = passengerRepository;
+        this.checkInRepository = checkInRepository;
+        this.auditLogRepository = auditLogRepository;
+        this.seatLockService = seatLockService;
+        this.seatEventPublisher = seatEventPublisher;
+        this.seatDomainEventPublisher = seatDomainEventPublisher;
+        this.checkInConfig = checkInConfig;
+        this.seatHoldCounter = Counter.builder("skyhigh.seats.holds")
+                .description("Number of seat holds").register(meterRegistry);
+        this.seatConfirmCounter = Counter.builder("skyhigh.seats.confirms")
+                .description("Number of seat confirmations").register(meterRegistry);
+        this.seatCancelCounter = Counter.builder("skyhigh.seats.cancellations")
+                .description("Number of seat cancellations").register(meterRegistry);
+    }
 
     @Cacheable(value = "seatMap", key = "#flightId")
     @Transactional(readOnly = true)
@@ -144,6 +175,7 @@ public class SeatService {
         evictSeatMapCache(seat.getFlight().getId());
 
         log.info("Seat {} successfully held for passenger {} until {}", seatId, passengerId, heldUntil);
+        seatHoldCounter.increment();
 
         return SeatHoldResponse.builder()
                 .seatId(seat.getId())
@@ -236,11 +268,88 @@ public class SeatService {
             logSeatChange(seat, previousStatus, "CONFIRMED", passengerId, "Seat confirmed by passenger");
 
             log.info("Seat {} confirmed for passenger {}", seatId, passengerId);
+            seatConfirmCounter.increment();
             return seat;
         } catch (ObjectOptimisticLockingFailureException e) {
             log.error("Optimistic lock failure while confirming seat {}", seatId);
             throw new InvalidSeatStateException("Seat was modified by another process. Please try again.");
         }
+    }
+
+    /**
+     * Cancels a confirmed seat assignment. The seat transitions to CANCELLED,
+     * then becomes AVAILABLE and is offered to waitlisted passengers via event.
+     */
+    @CacheEvict(value = "seatMap", allEntries = true)
+    @Transactional
+    public Seat cancelConfirmedSeat(UUID seatId, UUID passengerId) {
+        log.info("Cancelling confirmed seat {} by passenger {}", seatId, passengerId);
+
+        Seat seat = seatRepository.findByIdWithLock(seatId)
+                .orElseThrow(() -> new ResourceNotFoundException("Seat", seatId));
+
+        Passenger passenger = passengerRepository.findById(passengerId)
+                .orElseThrow(() -> new ResourceNotFoundException("Passenger", passengerId));
+
+        if (!seat.isConfirmed()) {
+            throw new InvalidSeatStateException("Seat is not in CONFIRMED state. Current state: " + seat.getStatus());
+        }
+
+        if (!seat.isConfirmedByPassenger(passengerId)) {
+            throw new InvalidSeatStateException("You did not confirm this seat");
+        }
+
+        try {
+            String previousStatus = seat.getStatus().name();
+
+            // Log the cancellation transition for audit trail
+            logSeatChange(seat, previousStatus, "CANCELLED", passengerId, "Seat cancelled by passenger");
+            seatCancelCounter.increment();
+
+            // Transition directly to AVAILABLE in a single atomic save
+            // (avoids crash leaving seat stuck in CANCELLED state)
+            seat.setCancelledByPassenger(passenger);
+            seat.setCancelledAt(LocalDateTime.now());
+            seat.setConfirmedByPassenger(null);
+            seat.resetToAvailable();
+            seat = seatRepository.save(seat);
+
+            logSeatChange(seat, "CANCELLED", "AVAILABLE", passengerId, "Cancelled seat made available for waitlist");
+
+            // Publish event AFTER transaction commits (prevents ghost events on rollback)
+            final Seat savedSeat = seat;
+            seatDomainEventPublisher.publishAfterCommit(SeatReleasedEvent.builder()
+                    .flightId(savedSeat.getFlight().getId())
+                    .seatId(savedSeat.getId())
+                    .seatNumber(savedSeat.getSeatNumber())
+                    .seatClass(savedSeat.getSeatClass().name())
+                    .reason("CANCELLED")
+                    .previousHolderId(passengerId)
+                    .releasedAt(LocalDateTime.now())
+                    .build());
+
+            log.info("Seat {} cancelled and made available. Waitlist notified.", seatId);
+            return seat;
+        } catch (ObjectOptimisticLockingFailureException e) {
+            log.error("Optimistic lock failure while cancelling seat {}", seatId);
+            throw new InvalidSeatStateException("Seat was modified by another process. Please try again.");
+        }
+    }
+
+    /**
+     * Publishes a seat released event for waitlist processing.
+     */
+    public void publishSeatReleasedEvent(Seat seat, String reason, UUID previousHolderId) {
+        SeatReleasedEvent event = SeatReleasedEvent.builder()
+                .flightId(seat.getFlight().getId())
+                .seatId(seat.getId())
+                .seatNumber(seat.getSeatNumber())
+                .seatClass(seat.getSeatClass().name())
+                .reason(reason)
+                .previousHolderId(previousHolderId)
+                .releasedAt(LocalDateTime.now())
+                .build();
+        seatEventPublisher.publishSeatReleased(event);
     }
 
     @Transactional(readOnly = true)

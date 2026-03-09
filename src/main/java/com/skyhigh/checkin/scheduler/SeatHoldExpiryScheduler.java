@@ -1,19 +1,23 @@
 package com.skyhigh.checkin.scheduler;
 
+import com.skyhigh.checkin.dto.event.SeatReleasedEvent;
 import com.skyhigh.checkin.model.entity.Seat;
 import com.skyhigh.checkin.model.entity.SeatAuditLog;
 import com.skyhigh.checkin.model.enums.SeatStatus;
 import com.skyhigh.checkin.repository.SeatAuditLogRepository;
 import com.skyhigh.checkin.repository.SeatRepository;
+import com.skyhigh.checkin.service.SeatEventPublisher;
 import com.skyhigh.checkin.service.SeatLockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.UUID;
 
 @Component
 @RequiredArgsConstructor
@@ -23,12 +27,17 @@ public class SeatHoldExpiryScheduler {
     private final SeatRepository seatRepository;
     private final SeatAuditLogRepository auditLogRepository;
     private final SeatLockService seatLockService;
+    private final SeatEventPublisher seatEventPublisher;
 
     /**
      * Runs every 10 seconds to release expired seat holds.
      * This is a backup mechanism - Redis TTL should handle most expirations.
+     * After releasing, publishes event to trigger waitlist processing.
+     *
+     * @SchedulerLock ensures only one instance runs this in a multi-instance deployment.
      */
-    @Scheduled(fixedRate = 10000) // 10 seconds
+    @Scheduled(fixedRate = 10000)
+    @SchedulerLock(name = "releaseExpiredSeatHolds", lockAtLeastFor = "5s", lockAtMostFor = "2m")
     @Transactional
     public void releaseExpiredSeatHolds() {
         LocalDateTime now = LocalDateTime.now();
@@ -51,6 +60,7 @@ public class SeatHoldExpiryScheduler {
 
     private void releaseSeat(Seat seat) {
         String previousStatus = seat.getStatus().name();
+        UUID previousHolderId = seat.getHeldByPassenger() != null ? seat.getHeldByPassenger().getId() : null;
 
         // Release Redis lock if exists
         seatLockService.forceReleaseLock(seat.getFlight().getId(), seat.getSeatNumber());
@@ -71,6 +81,18 @@ public class SeatHoldExpiryScheduler {
                 .changeReason("Seat hold expired (scheduler)")
                 .build();
         auditLogRepository.save(auditLog);
+
+        // Publish event to trigger waitlist processing
+        SeatReleasedEvent event = SeatReleasedEvent.builder()
+                .flightId(seat.getFlight().getId())
+                .seatId(seat.getId())
+                .seatNumber(seat.getSeatNumber())
+                .seatClass(seat.getSeatClass().name())
+                .reason("HOLD_EXPIRED")
+                .previousHolderId(previousHolderId)
+                .releasedAt(LocalDateTime.now())
+                .build();
+        seatEventPublisher.publishSeatReleased(event);
 
         log.info("Released expired seat hold: {} on flight {}", seat.getSeatNumber(), seat.getFlight().getFlightNumber());
     }

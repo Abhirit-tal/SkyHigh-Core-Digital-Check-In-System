@@ -199,13 +199,22 @@ public class CheckInService {
 
         CheckIn checkIn = getAndValidateCheckIn(checkInId, principal);
 
-        if (checkIn.isCompleted()) {
-            throw new InvalidSeatStateException("Cannot cancel a completed check-in");
+        if (checkIn.getStatus() == CheckInStatus.CANCELLED) {
+            throw new InvalidSeatStateException("Check-in is already cancelled");
+        }
+
+        if (checkIn.getStatus() == CheckInStatus.EXPIRED) {
+            throw new InvalidSeatStateException("Cannot cancel an expired check-in");
         }
 
         // Release held seat if any
         if (checkIn.getSeat() != null && checkIn.getSeat().isHeld()) {
             seatService.releaseSeatHold(checkIn.getSeat().getId(), principal.getPassengerId());
+        }
+
+        // Cancel confirmed seat if check-in was completed
+        if (checkIn.isCompleted() && checkIn.getSeat() != null && checkIn.getSeat().isConfirmed()) {
+            seatService.cancelConfirmedSeat(checkIn.getSeat().getId(), principal.getPassengerId());
         }
 
         checkIn.setStatus(CheckInStatus.CANCELLED);

@@ -6,6 +6,7 @@ import com.skyhigh.checkin.repository.CheckInRepository;
 import com.skyhigh.checkin.service.SeatLockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,7 +25,8 @@ public class CheckInSessionExpiryScheduler {
     /**
      * Runs every minute to expire inactive check-in sessions.
      */
-    @Scheduled(fixedRate = 60000) // 1 minute
+    @Scheduled(fixedRate = 60000)
+    @SchedulerLock(name = "expireInactiveSessions", lockAtLeastFor = "15s", lockAtMostFor = "3m")
     @Transactional
     public void expireInactiveSessions() {
         LocalDateTime now = LocalDateTime.now();

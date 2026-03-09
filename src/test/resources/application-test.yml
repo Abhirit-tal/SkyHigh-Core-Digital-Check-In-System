@@ -30,12 +30,19 @@ spring:
   cache:
     type: simple
 
+
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration
+
 jwt:
   secret: test-secret-key-for-jwt-token-generation-minimum-256-bits-required
   access-token-expiration: 7200000
   refresh-token-expiration: 86400000
 
 skyhigh:
+  rabbitmq:
+    enabled: false
   checkin:
     seat-hold-duration-seconds: 120
     session-timeout-minutes: 10
@@ -43,6 +50,11 @@ skyhigh:
     excess-baggage-fee-per-kg: 200
     checkin-window-opens-hours: 24
     checkin-window-closes-hours: 1
+    waitlist-offer-duration-minutes: 5
+    waitlist-max-per-flight: 50
+    rate-limit-seat-map-max-requests: 50
+    rate-limit-seat-map-window-seconds: 2
+    rate-limit-block-duration-minutes: 5
 
 logging:
   level:

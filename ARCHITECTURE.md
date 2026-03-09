@@ -2,7 +2,7 @@
 
 ## 1. Architecture Overview
 
-The SkyHigh Core Digital Check-In System is designed as a **monolithic application** with clear internal module boundaries, optimized for high concurrency during peak check-in hours.
+The SkyHigh Core Digital Check-In System is designed as a **monolithic application** with clear internal module boundaries, optimized for high concurrency during peak check-in hours. It uses an **event-driven architecture** via RabbitMQ for waitlist processing and notifications.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -16,47 +16,48 @@ The SkyHigh Core Digital Check-In System is designed as a **monolithic applicati
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                        API LAYER                                     │    │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │    │
-│  │  │  Auth    │ │  Flight  │ │  Seat    │ │ Check-In │ │ Boarding  │ │    │
-│  │  │Controller│ │Controller│ │Controller│ │Controller│ │   Pass    │ │    │
+│  │  │  Auth    │ │  Flight  │ │  Seat    │ │ Check-In │ │ Waitlist  │ │    │
+│  │  │Controller│ │Controller│ │Controller│ │Controller│ │Controller │ │    │
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └───────────┘ │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                    │                                         │
 │  ┌─────────────────────────────────┴───────────────────────────────────┐    │
 │  │                      SERVICE LAYER                                   │    │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │    │
-│  │  │  Auth    │ │  Seat    │ │ Check-In │ │ Payment  │ │ Boarding  │ │    │
-│  │  │ Service  │ │ Service  │ │ Service  │ │ Service  │ │   Pass    │ │    │
-│  │  └──────────┘ └────┬─────┘ └──────────┘ └──────────┘ └───────────┘ │    │
-│  │                    │                                                │    │
-│  │               ┌────┴─────┐                                          │    │
-│  │               │ SeatLock │  (Redis Distributed Lock)                │    │
-│  │               │ Service  │                                          │    │
-│  │               └──────────┘                                          │    │
+│  │  │  Seat    │ │ Check-In │ │ Waitlist │ │RateLimiter│ │  Event    │ │    │
+│  │  │ Service  │ │ Service  │ │ Service  │ │ Service  │ │ Publisher │ │    │
+│  │  └────┬─────┘ └──────────┘ └─────┬────┘ └──────────┘ └─────┬─────┘ │    │
+│  │       │                          │                          │       │    │
+│  │  ┌────┴─────┐              ┌─────┴──────┐            ┌──────┴─────┐ │    │
+│  │  │ SeatLock │              │  Waitlist   │            │  RabbitMQ  │ │    │
+│  │  │ Service  │              │  Event      │            │  Template  │ │    │
+│  │  │ (Redis)  │              │  Listener   │            │            │ │    │
+│  │  └──────────┘              └─────────────┘            └────────────┘ │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                    │                                         │
 │  ┌─────────────────────────────────┴───────────────────────────────────┐    │
 │  │                    DATA ACCESS LAYER                                 │    │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │    │
-│  │  │ Flight   │ │  Seat    │ │ Booking  │ │ CheckIn  │ │ Boarding  │ │    │
-│  │  │   Repo   │ │   Repo   │ │   Repo   │ │   Repo   │ │ Pass Repo │ │    │
+│  │  │  Seat    │ │ Booking  │ │ CheckIn  │ │ Waitlist │ │  Abuse    │ │    │
+│  │  │   Repo   │ │   Repo   │ │   Repo   │ │   Repo   │ │ Audit Repo│ │    │
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └───────────┘ │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                    │                                         │
-│  ┌──────────────────┐    ┌─────────┴─────────┐                              │
-│  │   SCHEDULERS     │    │     SECURITY      │                              │
-│  │ • Seat Expiry    │    │ • JWT Filter      │                              │
-│  │ • Session Expiry │    │ • Access Checker  │                              │
-│  └──────────────────┘    └───────────────────┘                              │
+│  ┌──────────────────────┐    ┌─────┴─────────────┐   ┌──────────────────┐   │
+│  │     SCHEDULERS       │    │     SECURITY      │   │   RATE LIMITING  │   │
+│  │ • Seat Hold Expiry   │    │ • JWT Filter      │   │ • RateLimitFilter│   │
+│  │ • Waitlist Offer     │    │ • Access Checker  │   │ • Redis Sliding  │   │
+│  │   Expiry             │    │                   │   │   Window         │   │
+│  └──────────────────────┘    └───────────────────┘   └──────────────────┘   │
 └───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-                 ┌──────────────────┼──────────────────┐
-                 │                  │                  │
-                 ▼                  ▼                  ▼
-          ┌───────────┐      ┌───────────┐      ┌───────────┐
-          │PostgreSQL │      │   Redis   │      │   File    │
-          │ (Primary  │      │  (Cache + │      │  System   │
-          │    DB)    │      │   Locks)  │      │  (PDFs)   │
-          └───────────┘      └───────────┘      └───────────┘
+                 ┌──────────────────┼──────────────────┬──────────────┐
+                 │                  │                  │              │
+                 ▼                  ▼                  ▼              ▼
+          ┌───────────┐      ┌───────────┐      ┌───────────┐  ┌──────────┐
+          │PostgreSQL │      │   Redis   │      │ RabbitMQ  │  │Prometheus│
+          │ (Primary  │      │  (Cache + │      │ (Message  │  │+ Grafana │
+          │    DB)    │      │   Locks)  │      │  Broker)  │  │(Metrics) │
+          └───────────┘      └───────────┘      └───────────┘  └──────────┘
 ```
 
 ## 2. Component Architecture
@@ -67,8 +68,9 @@ The SkyHigh Core Digital Check-In System is designed as a **monolithic applicati
 |------------|-----------|----------------|
 | AuthController | `/api/v1/auth/*` | Login, token refresh, logout |
 | FlightController | `/api/v1/flights/*` | Flight info, seat maps |
-| SeatController | `/api/v1/seats/*` | Hold, release, confirm seats |
+| SeatController | `/api/v1/seats/*` | Hold, release, confirm, cancel seats |
 | CheckInController | `/api/v1/check-in/*` | Check-in lifecycle |
+| WaitlistController | `/api/v1/flights/{id}/waitlist/*`, `/api/v1/waitlist/*` | Waitlist join, leave, status, accept/decline |
 | BoardingPassController | `/api/v1/boarding-pass/*` | Boarding pass retrieval |
 
 ### 2.2 Service Layer
@@ -77,8 +79,12 @@ The SkyHigh Core Digital Check-In System is designed as a **monolithic applicati
 |---------|----------------|
 | AuthService | JWT generation, credential validation |
 | FlightService | Flight information retrieval |
-| SeatService | Seat lifecycle management, caching |
-| SeatLockService | Redis distributed locking |
+| SeatService | Seat lifecycle management (hold, confirm, cancel), caching |
+| SeatLockService | Redis distributed locking (SETNX + TTL) |
+| SeatEventPublisher | Publishes seat released events to RabbitMQ |
+| WaitlistService | Waitlist FIFO management, offer/accept/decline/expire |
+| WaitlistEventListener | RabbitMQ consumer — processes seat released events |
+| RateLimiterService | Redis sliding-window rate limiter, abuse detection |
 | CheckInService | Check-in orchestration |
 | WeightService | Baggage validation (mock) |
 | PaymentService | Payment processing (mock) |
@@ -370,7 +376,8 @@ RuntimeException
             ├── Conflicts
             │   ├── SeatAlreadyHeldException
             │   ├── SeatAlreadyConfirmedException
-            │   └── CheckInAlreadyExistsException
+            │   ├── CheckInAlreadyExistsException
+            │   └── AlreadyOnWaitlistException
             │
             ├── Business Rules
             │   ├── CheckInWindowNotOpenException
@@ -378,13 +385,97 @@ RuntimeException
             │   ├── SeatHoldExpiredException
             │   ├── SessionExpiredException
             │   ├── PaymentRequiredException
-            │   └── PaymentFailedException
+            │   ├── PaymentFailedException
+            │   ├── WaitlistFullException
+            │   └── WaitlistOfferExpiredException
+            │
+            ├── Rate Limiting
+            │   └── RateLimitExceededException (HTTP 429)
             │
             └── Validation
                 └── InvalidSeatStateException
 ```
 
-## 10. Performance Considerations
+## 10. Event-Driven Architecture
+
+### 10.1 RabbitMQ Message Flow
+
+```
+┌──────────────┐     ┌───────────────────┐     ┌──────────────────────┐
+│ Seat Service │────▶│  skyhigh.events   │────▶│ WaitlistEventListener│
+│ (Publisher)  │     │  (Topic Exchange) │     │ (Consumer)           │
+│              │     │                   │     │                      │
+│ Cancel/Expiry│     │  Routing Keys:    │     │ offerSeatToNextInLine│
+│ triggers     │     │  seat.released    │     │                      │
+│ event publish│     │  waitlist.offer   │     │ Processes waitlist   │
+│              │     │  waitlist.notify  │     │ queue, sends offers  │
+└──────────────┘     └───────────────────┘     └──────────────────────┘
+```
+
+### 10.2 Event Types
+
+| Event | Routing Key | Trigger | Consumer |
+|-------|-------------|---------|----------|
+| SeatReleasedEvent | `seat.released` | Hold expiry, cancellation | WaitlistEventListener |
+| WaitlistOfferEvent | `waitlist.notification` | Seat offered to waitlisted passenger | Notification stub |
+
+### 10.3 Fault Tolerance
+
+- **RabbitMQ unavailable**: SeatEventPublisher logs warning; waitlist processing falls back to scheduler-based polling
+- **Consumer failure**: RabbitMQ retry (3 attempts, exponential backoff)
+- **Message ordering**: Per-queue FIFO guarantees correct waitlist order
+
+## 11. Abuse Detection & Rate Limiting
+
+### 11.1 Sliding Window Algorithm
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                   Redis Sorted Set (per source)                   │
+│  Key: ratelimit:seat-map:{IP}:{passengerId}                     │
+│  Score: timestamp (ms)     Value: request timestamp              │
+│                                                                   │
+│  ─────[────────── 2-second window ──────────]─────▶ time         │
+│       t-2000ms                              now                   │
+│                                                                   │
+│  ZADD (add new request) → ZREMRANGEBYSCORE (remove old)          │
+│  → ZCARD (count in window) → if > 50: BLOCK source              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 11.2 Blocking Mechanism
+
+| Step | Action |
+|------|--------|
+| 1 | `RateLimitingFilter` intercepts GET `/api/v1/flights/*/seats` requests |
+| 2 | `RateLimiterService` checks Redis sorted set count in 2s window |
+| 3 | If > 50 requests → set `blocked:{source}` key with 5-minute TTL |
+| 4 | Record abuse event in `abuse_audit_log` table |
+| 5 | Return HTTP 429 with `Retry-After` header |
+
+## 12. Observability
+
+### 12.1 Metrics (Prometheus)
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `skyhigh.seats.holds` | Counter | Number of seat holds |
+| `skyhigh.seats.confirms` | Counter | Number of seat confirmations |
+| `skyhigh.seats.cancellations` | Counter | Number of seat cancellations |
+| `skyhigh.waitlist.joins` | Counter | Number of waitlist joins |
+| `skyhigh.waitlist.offers` | Counter | Number of waitlist offers |
+| `skyhigh.waitlist.assignments` | Counter | Number of waitlist assignments |
+| `skyhigh.ratelimit.blocks` | Counter | Number of sources blocked |
+
+### 12.2 Infrastructure
+
+| Tool | Port | Purpose |
+|------|------|---------|
+| Prometheus | 9090 | Metrics collection (scrapes /actuator/prometheus every 10s) |
+| Grafana | 3000 | Dashboard visualization (admin/admin) |
+| RabbitMQ Management | 15672 | Message broker monitoring (guest/guest) |
+
+## 13. Performance Considerations
 
 | Component | Optimization |
 |-----------|--------------|
@@ -392,5 +483,49 @@ RuntimeException
 | Seat Locks | Redis SETNX (sub-ms) |
 | Database | Connection pooling (HikariCP, 20 connections) |
 | Queries | Indexed columns, optimized JPA queries |
-| Schedulers | Non-blocking, every 10s/60s |
+| Schedulers | Non-blocking, every 10s/60s, ShedLock-protected |
+
+## 14. Distributed Scheduling (ShedLock)
+
+When the application is scaled horizontally (multiple instances), each `@Scheduled` task must run on **only one instance** at a time to prevent duplicate processing.
+
+**Solution**: ShedLock with Redis-backed `LockProvider`.
+
+| Scheduler | Frequency | Lock At Least | Lock At Most |
+|-----------|-----------|---------------|--------------|
+| `SeatHoldExpiryScheduler` | 10s | 5s | 2m |
+| `WaitlistOfferExpiryScheduler` | 30s | 10s | 2m |
+| `CheckInSessionExpiryScheduler` | 60s | 15s | 3m |
+
+**Lock key pattern**: `skyhigh-checkin:{schedulerName}`
+
+```
+Instance A: @Scheduled fires → acquires ShedLock → executes → releases lock
+Instance B: @Scheduled fires → ShedLock held → skips execution
+```
+
+## 15. Transactional Event Safety
+
+Seat-released events (for waitlist processing) are published using Spring's `@TransactionalEventListener(phase = AFTER_COMMIT)`:
+
+```
+1. @Transactional method: cancel seat → save to DB → register domain event
+2. Transaction commits successfully
+3. @TransactionalEventListener fires → SeatEventPublisher → RabbitMQ
+```
+
+**Guarantees**:
+- If DB transaction rolls back → no event is published (no ghost messages)
+- If RabbitMQ is down → DB change is committed, scheduler fallback handles waitlist
+- Eventual consistency between DB state and message broker
+
+## 16. JWT Secret Management
+
+| Environment | Secret Source |
+|-------------|-------------|
+| Development | Default fallback in `application.yml` |
+| Docker Compose | `${JWT_SECRET}` env var (override via `.env` file) |
+| Production | External vault (AWS Secrets Manager, HashiCorp Vault, K8s Secrets) |
+
+Startup warning is logged if the default secret is detected.
 

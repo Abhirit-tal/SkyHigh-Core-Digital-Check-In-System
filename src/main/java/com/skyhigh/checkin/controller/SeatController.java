@@ -52,12 +52,31 @@ public class SeatController {
 
     @PostMapping("/{seatId}/confirm")
     @Operation(summary = "Confirm seat assignment",
-               description = "Permanently confirm a held seat. This action cannot be undone.")
+               description = "Permanently confirm a held seat.")
     public ResponseEntity<SeatHoldResponse> confirmSeat(
             @PathVariable UUID seatId,
             @AuthenticationPrincipal PassengerPrincipal principal) {
         log.info("Confirming seat {} for passenger {}", seatId, principal.getPassengerId());
         var seat = seatService.confirmSeat(seatId, principal.getPassengerId());
+
+        SeatHoldResponse response = SeatHoldResponse.builder()
+                .seatId(seat.getId())
+                .seatNumber(seat.getSeatNumber())
+                .seatClass(seat.getSeatClass())
+                .status(seat.getStatus())
+                .build();
+
+        return ResponseEntity.ok(response);
+    }
+
+    @DeleteMapping("/{seatId}/confirm")
+    @Operation(summary = "Cancel confirmed seat",
+               description = "Cancel a previously confirmed seat. The seat becomes available and is offered to waitlisted passengers.")
+    public ResponseEntity<SeatHoldResponse> cancelConfirmedSeat(
+            @PathVariable UUID seatId,
+            @AuthenticationPrincipal PassengerPrincipal principal) {
+        log.info("Cancelling confirmed seat {} by passenger {}", seatId, principal.getPassengerId());
+        var seat = seatService.cancelConfirmedSeat(seatId, principal.getPassengerId());
 
         SeatHoldResponse response = SeatHoldResponse.builder()
                 .seatId(seat.getId())

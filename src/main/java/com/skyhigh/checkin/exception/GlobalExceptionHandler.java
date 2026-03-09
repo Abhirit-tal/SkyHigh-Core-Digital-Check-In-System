@@ -221,6 +221,62 @@ public class GlobalExceptionHandler {
         return buildErrorResponse(HttpStatus.UNPROCESSABLE_ENTITY, ex, request, null);
     }
 
+    // ============ WAITLIST EXCEPTIONS ============
+
+    @ExceptionHandler(AlreadyOnWaitlistException.class)
+    public ResponseEntity<ErrorResponse> handleAlreadyOnWaitlist(
+            AlreadyOnWaitlistException ex, HttpServletRequest request) {
+        log.warn("Already on waitlist: {}", ex.getMessage());
+        return buildErrorResponse(HttpStatus.CONFLICT, ex, request, null);
+    }
+
+    @ExceptionHandler(WaitlistFullException.class)
+    public ResponseEntity<ErrorResponse> handleWaitlistFull(
+            WaitlistFullException ex, HttpServletRequest request) {
+        log.warn("Waitlist full: {}", ex.getMessage());
+        return buildErrorResponse(HttpStatus.UNPROCESSABLE_ENTITY, ex, request, null);
+    }
+
+    @ExceptionHandler(WaitlistOfferExpiredException.class)
+    public ResponseEntity<ErrorResponse> handleWaitlistOfferExpired(
+            WaitlistOfferExpiredException ex, HttpServletRequest request) {
+        log.warn("Waitlist offer expired");
+        return buildErrorResponse(HttpStatus.GONE, ex, request, null);
+    }
+
+    // ============ RATE LIMITING EXCEPTIONS ============
+
+    @ExceptionHandler(RateLimitExceededException.class)
+    public ResponseEntity<ErrorResponse> handleRateLimitExceeded(
+            RateLimitExceededException ex, HttpServletRequest request) {
+        log.warn("Rate limit exceeded for: {} {}", request.getMethod(), request.getRequestURI());
+
+        String requestId = UUID.randomUUID().toString();
+        ErrorResponse response = ErrorResponse.builder()
+                .error(ErrorResponse.ErrorDetail.builder()
+                        .code("RATE_LIMIT_EXCEEDED")
+                        .message(ex.getMessage())
+                        .retryable(true)
+                        .retryAfterSeconds(ex.getRetryAfterSeconds())
+                        .build())
+                .meta(ErrorResponse.Meta.builder()
+                        .timestamp(LocalDateTime.now())
+                        .requestId(requestId)
+                        .path(request.getRequestURI())
+                        .build())
+                .suggestions(List.of(
+                        ErrorResponse.Suggestion.builder()
+                                .action("WAIT_AND_RETRY")
+                                .message("Please wait " + ex.getRetryAfterSeconds() + " seconds before retrying")
+                                .build()
+                ))
+                .build();
+
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header("Retry-After", String.valueOf(ex.getRetryAfterSeconds()))
+                .body(response);
+    }
+
     // ============ VALIDATION EXCEPTIONS ============
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
